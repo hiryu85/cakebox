@@ -100,7 +100,17 @@ class Dropbox extends DropboxAppModel {
 		$args = func_get_args();
 		return call_user_func_array(array($this, 'files'), $args);
 	}
-	
+
+/**
+ * Upload a file
+ * Dropbox API Method: /files_put (PUT)
+ * @return array
+ */	
+	public function upload() {
+		$args = func_get_args();
+		return call_user_func_array(array($this, 'files_put'), $args);
+	}
+
 /**
  * Return a link directly to a file
  * Dropbox API Method: /media
@@ -127,7 +137,7 @@ class Dropbox extends DropboxAppModel {
  * @param array $params
  * @return array
  */
-	public function __call($method, $params = array()) {
+	public function __call($method, $params = array()) {		
 		$skip = array('requesttoken', 'requestaccess');
 		if (in_array(strtolower($method), $skip)) {
 			return parent::__call($method, $params);
