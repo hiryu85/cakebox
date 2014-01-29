@@ -42,6 +42,9 @@ class DropboxSource extends DataSource {
 		 * 'cache-name' = cache config to use
 		 */
 		'cache' => true,
+		'cache_ignore_api' => array(
+			'files_put',
+		),
 	);
 
 /**
@@ -180,7 +183,7 @@ class DropboxSource extends DataSource {
 		}
 
 		// Check cache
-		$res = Cache::read($endpoint, $this->config['cache']) && !in_array($api, array('files', 'files_put'));
+		$res = Cache::read($endpoint, $this->config['cache']);
 		if ($res === false) {
 			// Hey Dropbox!
 			$request = array_merge(array(
@@ -189,40 +192,22 @@ class DropboxSource extends DataSource {
 				), 
 				array(
 					'header' => array(
-						'Authorization' => $oauth['header']
+						'User-Agent' => 'CakeBox'
 					)
 				)
 			);
 
 
-			if (in_array($api, array('files_put', 'files'))) {
+			if (in_array($api, array('files_put'))) {
 				// The boundary string is used to identify the different parts of a
 				// multipart http request
 				$boundaryString = 'DropboxUPLOAD' . String::uuid();
 
+				$request['method'] = 'PUT';
 				$request['header']['Content-Type'] = 'multipart/form-data; boundary=' . $boundaryString . '';
 
-				// Get mimetype
-				if (function_exists("finfo_file")) {
-					$finfo = finfo_open(FILEINFO_MIME_TYPE); // return mime type ala mimetype extension
-					$data['conditions']['mime'] = finfo_file($finfo, $data['conditions']['file']);
-					finfo_close($finfo);
-				} else {
-					if (empty($data['conditions']['mime'])) {
-						throw new Exception(__d('dropbox', 'That operation requires the parameter mime'));
-						return array();
-					}
-				}
-
 				// Build the multipart body of the http request
-				$request['body'] = '';
-				$request['body'] .= "--$boundaryString\r\n";
-				$request['body'] .= sprintf("Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n", basename($data['conditions']['file']));
-				$request['body'] .= sprintf("Content-Type: text/plain\r\n", $data['conditions']['mime']);
-				$request['body'] .= "Content-Transfer-Encoding: binary\r\n";
-				$request['body'] .= "\r\n";
-				$request['body'] .= file_get_contents($data['conditions']['file'])."\r\n";
-				$request['body'] .= "--$boundaryString--\r\n";
+				$request['body'] = file_get_contents($data['conditions']['file'])."\r\n";
 
 				// Remove oAuth parameters in url, and create Authorization header
 				$query = array();
@@ -233,7 +218,9 @@ class DropboxSource extends DataSource {
 					if (strpos($key, 'oauth_') === 0) {
 						$oauth[$key] = $value;
 					} else {
-						$query[] = sprintf('%s=%s', $key, $value);
+						if (!in_array($key, array('file'))) {
+							$query[] = sprintf('%s=%s', $key, $value);
+						}
 					}
 
 				}
@@ -246,7 +233,8 @@ class DropboxSource extends DataSource {
 				}
 
 				
-				// oAuth Authorization 
+				// oAuth Authorization
+				// TODO: use OAuthSimple for make Authorization header
 				extract($oauth);
 				$request['header']['Authorization'] = sprintf(
 					'OAuth oauth_version="1.0", oauth_signature_method="PLAINTEXT", oauth_consumer_key="%s", oauth_token="%s", oauth_signature="%s&%s"',
@@ -278,7 +266,7 @@ class DropboxSource extends DataSource {
 				return array();
 			}
 			// Cache it?
-			if ($this->config['cache'] !== false) {
+			if ($this->config['cache'] !== false && !in_array($api, $this->config['cache_ignore_api'])) {
 				Cache::write($endpoint, $res, $this->config['cache']);
 			}
 		}
