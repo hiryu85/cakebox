@@ -120,11 +120,20 @@ class DropboxSource extends DataSource {
 		// Check for required parameters
 		if (in_array($api, array('fileops/move', 'fileops/copy'))) {
 			if (empty($data['conditions']['from_path'])) {
-				throw new Exception(_d('dropbox', 'That operation requires the parameter from_path'));
+				throw new Exception(__d('dropbox', 'That operation requires the parameter from_path'));
 				return array();
 			}
 			if (empty($data['conditions']['to_path'])) {
-				throw new Exception(_d('dropbox', 'That operation requires the parameter to_path'));
+				throw new Exception(__d('dropbox', 'That operation requires the parameter to_path'));
+				return array();
+			}
+		} elseif (in_array($api, array('files', 'files_put'))) {
+			if (empty($data['conditions']['file'])) {
+				throw new Exception(__d('dropbox', 'That operation requires the parameter file'));
+				return array();
+			}
+			if (!file_exists($data['conditions']['file'])) {
+				throw new Exception(sprintf(__d('dropbox', 'Update fail: %s not exists'), $data['conditions']['file']));
 				return array();
 			}
 		}
@@ -144,8 +153,13 @@ class DropboxSource extends DataSource {
 		$data['conditions']['path'] = str_replace('%2F', '/', $data['conditions']['path']);
 
 		// Build endpoint
-		$endpoint = $api . '/' . $data['conditions']['root'] . '/' . $data['conditions']['path'];
-		unset($data['conditions']['root'], $data['conditions']['path']);
+		// Give "root" and "path" in url
+		if (in_array($api, array('files', 'files_put', 'metadata', 'revisions', 'restore', 'search', 'shares', 'media', 'copy_ref', 'thumbnails', 'commit_chunked_upload'))) {
+			$endpoint = $api . '/' . $data['conditions']['root'] . '/' . $data['conditions']['path'];
+			unset($data['conditions']['root'], $data['conditions']['path']);
+		} else { // Give "root" and "path" in query string
+			$endpoint = $api;
+		}
 
 		// Build OAuth Sig
 		$this->oauth->reset();
@@ -166,13 +180,88 @@ class DropboxSource extends DataSource {
 		}
 
 		// Check cache
-		$res = Cache::read($endpoint, $this->config['cache']);
+		$res = Cache::read($endpoint, $this->config['cache']) && !in_array($api, array('files', 'files_put'));
 		if ($res === false) {
 			// Hey Dropbox!
-			$json = $this->_request($oauth['signed_url']);
+			$request = array_merge(array(
+					'uri'    => parse_url($oauth['signed_url']),
+					'method' => !empty($data['method']) ? $data['method'] : 'GET'
+				), 
+				array(
+					'header' => array(
+						'Authorization' => $oauth['header']
+					)
+				)
+			);
+
+
+			if (in_array($api, array('files_put', 'files'))) {
+				// The boundary string is used to identify the different parts of a
+				// multipart http request
+				$boundaryString = 'DropboxUPLOAD' . String::uuid();
+
+				$request['header']['Content-Type'] = 'multipart/form-data; boundary=' . $boundaryString . '';
+
+				// Get mimetype
+				if (function_exists("finfo_file")) {
+					$finfo = finfo_open(FILEINFO_MIME_TYPE); // return mime type ala mimetype extension
+					$data['conditions']['mime'] = finfo_file($finfo, $data['conditions']['file']);
+					finfo_close($finfo);
+				} else {
+					if (empty($data['conditions']['mime'])) {
+						throw new Exception(__d('dropbox', 'That operation requires the parameter mime'));
+						return array();
+					}
+				}
+
+				// Build the multipart body of the http request
+				$request['body'] = '';
+				$request['body'] .= "--$boundaryString\r\n";
+				$request['body'] .= sprintf("Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n", basename($data['conditions']['file']));
+				$request['body'] .= sprintf("Content-Type: text/plain\r\n", $data['conditions']['mime']);
+				$request['body'] .= "Content-Transfer-Encoding: binary\r\n";
+				$request['body'] .= "\r\n";
+				$request['body'] .= file_get_contents($data['conditions']['file'])."\r\n";
+				$request['body'] .= "--$boundaryString--\r\n";
+
+				// Remove oAuth parameters in url, and create Authorization header
+				$query = array();
+				$oauth = array();
+				foreach (explode('&', $request['uri']['query']) as $param) {
+					list($key, $value) = explode('=', $param);
+					
+					if (strpos($key, 'oauth_') === 0) {
+						$oauth[$key] = $value;
+					} else {
+						$query[] = sprintf('%s=%s', $key, $value);
+					}
+
+				}
+
+				// Remove oAuth parameters from URL
+				if (!empty($query)) {
+					$request['uri']['query'] = implode('&', $query);
+				} else {
+					unset($request['uri']['query']);
+				}
+
+				
+				// oAuth Authorization 
+				extract($oauth);
+				$request['header']['Authorization'] = sprintf(
+					'OAuth oauth_version="1.0", oauth_signature_method="PLAINTEXT", oauth_consumer_key="%s", oauth_token="%s", oauth_signature="%s&%s"',
+					$oauth_consumer_key,
+					$oauth_token,
+					$this->config['consumer_secret'],
+					$this->config['token_secret']
+				);
+			}
+
+			$json = $this->_request($request);
 			if ($json === false) {
 				return array();
 			}
+
 			$res = json_decode($json, true);
 			if (is_null($res) && !empty($json)) {
 				// file download - output file content
@@ -314,8 +403,8 @@ class DropboxSource extends DataSource {
  * @param string $url
  * @return mixed
  */
-	protected function _request($url = null) {
-		$res = $this->http->request($url);
+	protected function _request($uri) {
+		$res = $this->http->request($uri);
 		if ($this->http->response['status']['code'] != 200) {
 			$error = json_decode($res, true);
 			if (empty($error['error'])) {
